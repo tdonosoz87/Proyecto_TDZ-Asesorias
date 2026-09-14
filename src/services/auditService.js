@@ -1,62 +1,37 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchAuthSession } from 'aws-amplify/auth';
-///
-import { DynamoDBClient, ScanCommand } from "@aws-sdk/client-dynamodb";
 
-const client = new DynamoDBClient({
-  region: import.meta.env.VITE_AWS_REGION,
-  credentials: {
-    accessKeyId: "CLAVE_DE_ACCESO_TEMPORAL_O_CONFIGURADA", // O por credenciales de Cognito Identity Pool
-    secretAccessKey: "SECRET_KEY_TEMPORAL"
-  }
-});
+const TABLE_NAME = 'tdz_access_logs';
 
-export const getAuditLogs = async () => {
-  try {
-    const command = new ScanCommand({
-      TableName: "AuditLogs"
-    });
-    const response = await client.send(command);
-    
-    // Mapear el formato interno de DynamoDB a un array JS limpio
-    return (response.Items || []).map(item => ({
-      id: item.id?.S,
-      userId: item.userId?.S,
-      action: item.action?.S,
-      timestamp: item.timestamp?.S
-    }));
-  } catch (error) {
-    console.error("Error al obtener registros de auditoria:", error);
-    throw error;
+// Función auxiliar para obtener el cliente autenticado de DynamoDB
+const getAuthenticatedDocClient = async () => {
+  const session = await fetchAuthSession();
+  const credentials = session.credentials;
+
+  if (!credentials) {
+    throw new Error('No se obtuvieron credenciales temporales de AWS Cognito.');
   }
+
+  const client = new DynamoDBClient({
+    region: import.meta.env.VITE_AWS_REGION,
+    credentials: {
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+      sessionToken: credentials.sessionToken,
+    },
+  });
+
+  return DynamoDBDocumentClient.from(client);
 };
-///
+
+// 1. Guardar evento de acceso
 export const logAccessEvent = async (userId, userEmail) => {
   try {
-    // Obtener las credenciales temporales de AWS desde la sesion activa de Cognito
-    const session = await fetchAuthSession();
-    const credentials = session.credentials;
-
-    if (!credentials) {
-      console.warn('No se obtuvieron credenciales temporales de AWS.');
-      return;
-    }
-
-    // Instanciar el cliente pasando las credenciales autorizadas
-    const client = new DynamoDBClient({
-      region: import.meta.env.VITE_AWS_REGION,
-      credentials: {
-        accessKeyId: credentials.accessKeyId,
-        secretAccessKey: credentials.secretAccessKey,
-        sessionToken: credentials.sessionToken,
-      },
-    });
-
-    const docClient = DynamoDBDocumentClient.from(client);
+    const docClient = await getAuthenticatedDocClient();
 
     const params = {
-      TableName: 'tdz_access_logs',
+      TableName: TABLE_NAME,
       Item: {
         userId: userId,
         loginTimestamp: new Date().toISOString(),
@@ -70,5 +45,29 @@ export const logAccessEvent = async (userId, userEmail) => {
     console.log('Evento de auditoria registrado exitosamente en DynamoDB.');
   } catch (error) {
     console.error('Error al registrar auditoria en DynamoDB:', error);
+  }
+};
+
+// 2. Obtener historial de auditoría
+export const getAuditLogs = async () => {
+  try {
+    const docClient = await getAuthenticatedDocClient();
+
+    const command = new ScanCommand({
+      TableName: TABLE_NAME
+    });
+
+    const response = await docClient.send(command);
+
+    // Con DocumentClient los objetos ya vienen desempaquetados de forma directa (sin .S o .N)
+    return (response.Items || []).map(item => ({
+      id: item.userId,
+      email: item.email,
+      status: item.status,
+      timestamp: item.loginTimestamp
+    }));
+  } catch (error) {
+    console.error('Error al obtener registros de auditoria:', error);
+    throw error;
   }
 };
